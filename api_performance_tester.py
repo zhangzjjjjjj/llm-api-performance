@@ -114,6 +114,16 @@ class APIPerformanceTester:
         # 打印汇总报告
         self._print_summary(results)
         
+        # 打印最大并发上限
+        if results:
+            max_concurrency_achieved = max(results.keys())
+            max_result = results[max_concurrency_achieved]
+            total_req = max_result.success_count + max_result.failure_count
+            success_rate = max_result.success_count / total_req if total_req else 0
+            max_concurrency_count = int(max_concurrency_achieved * success_rate)
+            
+            print(f"\n最大并发上限: {max_concurrency_count}")
+        
         return results
         
     def _print_summary(self, results):
