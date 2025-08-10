@@ -21,6 +21,7 @@ import json
 
 # 默认配置值（仅作为 argparse 的默认值使用）
 DEFAULT_API_URL = "https://open.bigmodel.cn/api/anthropic/v1/messages"
+DEFAULT_CHAT_API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 DEFAULT_MODEL = "glm-4.5"
 DEFAULT_TEST_MESSAGE = "What opportunities and challenges will the Chinese large model industry face in 2025?"
 DEFAULT_MIN_CONCURRENCY = 5
@@ -38,7 +39,7 @@ class APIPerformanceTester:
     def __init__(self, api_url=None, api_key=None, model=None, test_message=None, 
                  min_concurrency=None, max_concurrency=None, step=None, test_rounds=None,
                  timeout=None, print_sample_errors=None, estimate_tokens_by_chars=None,
-                 chars_per_token=None):
+                 chars_per_token=None, use_chat_api=None):
         """初始化测试配置
         
         Args:
@@ -54,9 +55,14 @@ class APIPerformanceTester:
             print_sample_errors: 打印错误数量
             estimate_tokens_by_chars: 是否估算 tokens
             chars_per_token: 字符/token 比率
+            use_chat_api: 是否使用 Chat API 接口
         """
         # API 配置
-        self.api_url = api_url or DEFAULT_API_URL
+        self.use_chat_api = use_chat_api or False
+        if self.use_chat_api and api_url is None:
+            self.api_url = DEFAULT_CHAT_API_URL
+        else:
+            self.api_url = api_url or DEFAULT_API_URL
         self.api_key = api_key
         self.model = model or DEFAULT_MODEL
         self.test_message = test_message or DEFAULT_TEST_MESSAGE
@@ -166,21 +172,34 @@ def make_request(tester=None):
     output_tokens = None  # 来自 message_delta 的 usage.output_tokens（累计）
     approx_chars = 0      # 如果需要估算时使用
 
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-
-    payload = {
-        "model": model,
-        "max_tokens": 1024,
-        "temperature": 0.2,
-        "messages": [
-            {"role": "user", "content": test_message}
-        ],
-        "stream": True
-    }
+    # 根据接口类型设置不同的 headers 和 payload
+    if tester.use_chat_api:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "user", "content": test_message}
+            ],
+            "stream": True
+        }
+    else:
+        headers = {
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+        payload = {
+            "model": model,
+            "max_tokens": 1024,
+            "temperature": 0.2,
+            "messages": [
+                {"role": "user", "content": test_message}
+            ],
+            "stream": True
+        }
 
     try:
         with requests.post(
@@ -209,43 +228,84 @@ def make_request(tester=None):
                 except json.JSONDecodeError:
                     continue
 
-                etype = event.get("type")
-
-                # 记录首 token 时间（第一段 text_delta 出现）
-                if etype == "content_block_delta":
-                    delta = event.get("delta", {})
-                    if delta.get("type") == "text_delta":
+                # 根据接口类型解析不同的响应格式
+                if tester.use_chat_api:
+                    # Chat API 格式
+                    choices = event.get("choices", [])
+                    if choices:
+                        choice = choices[0]
+                        delta = choice.get("delta", {})
+                        
+                        # 记录首 token 时间（第一个 content 出现）
+                        if "content" in delta and delta.get("content"):
+                            if first_token_time is None:
+                                first_token_time = time.time() - start_time
+                            if estimate_tokens_by_chars:
+                                approx_chars += len(delta.get("content", ""))
+                        
+                        # 获取 usage 信息
+                        usage = event.get("usage")
+                        if usage and "completion_tokens" in usage:
+                            output_tokens = usage.get("completion_tokens")
+                    
+                    # 检查是否结束
+                    if event.get("choices", [{}])[0].get("finish_reason") == "stop":
+                        total_time = time.time() - start_time
                         if first_token_time is None:
-                            first_token_time = time.time() - start_time
-                        if estimate_tokens_by_chars:
-                            approx_chars += len(delta.get("text", ""))
+                            first_token_time = total_time
+                        
+                        # 若未拿到 usage.completion_tokens，按需估算
+                        if output_tokens is None and estimate_tokens_by_chars:
+                            output_tokens = max(1, int(approx_chars / chars_per_token))
+                        
+                        # 计算 tokens/s
+                        tokens_per_sec = None
+                        if output_tokens is not None and total_time > 0:
+                            tokens_per_sec = output_tokens / total_time
+                        
+                        return (True, total_time, status, None, first_token_time, output_tokens, tokens_per_sec)
+                else:
+                    # Anthropic API 格式
+                    etype = event.get("type")
 
-                # usage 累加通常在 message_delta 事件里
-                if etype == "message_delta":
-                    usage = event.get("usage") or {}
-                    # 一般是累计值（到当前为止的输出 token 数）
-                    if "output_tokens" in usage:
-                        output_tokens = usage.get("output_tokens")
+                    # 记录首 token 时间（第一段 text_delta 出现）
+                    if etype == "content_block_delta":
+                        delta = event.get("delta", {})
+                        if delta.get("type") == "text_delta":
+                            if first_token_time is None:
+                                first_token_time = time.time() - start_time
+                            if estimate_tokens_by_chars:
+                                approx_chars += len(delta.get("text", ""))
 
-                if etype == "message_stop":
-                    total_time = time.time() - start_time
-                    if first_token_time is None:
-                        first_token_time = total_time  # 极端情况：几乎无输出
+                    # usage 累加通常在 message_delta 事件里
+                    if etype == "message_delta":
+                        usage = event.get("usage") or {}
+                        # 一般是累计值（到当前为止的输出 token 数）
+                        if "output_tokens" in usage:
+                            output_tokens = usage.get("output_tokens")
 
-                    # 若未拿到 usage.output_tokens，按需估算
-                    if output_tokens is None and estimate_tokens_by_chars:
-                        output_tokens = max(1, int(approx_chars / chars_per_token))
+                    if etype == "message_stop":
+                        total_time = time.time() - start_time
+                        if first_token_time is None:
+                            first_token_time = total_time  # 极端情况：几乎无输出
 
-                    # 计算 tokens/s
-                    tokens_per_sec = None
-                    if output_tokens is not None and total_time > 0:
-                        tokens_per_sec = output_tokens / total_time
+                        # 若未拿到 usage.output_tokens，按需估算
+                        if output_tokens is None and estimate_tokens_by_chars:
+                            output_tokens = max(1, int(approx_chars / chars_per_token))
 
-                    return (True, total_time, status, None, first_token_time, output_tokens, tokens_per_sec)
+                        # 计算 tokens/s
+                        tokens_per_sec = None
+                        if output_tokens is not None and total_time > 0:
+                            tokens_per_sec = output_tokens / total_time
 
-            # 未收到 message_stop
+                        return (True, total_time, status, None, first_token_time, output_tokens, tokens_per_sec)
+
+            # 未收到结束标志
             total_time = time.time() - start_time
-            return (False, total_time, status, "Stream ended without message_stop", first_token_time, output_tokens, None)
+            if tester.use_chat_api:
+                return (False, total_time, status, "Stream ended without finish_reason=stop", first_token_time, output_tokens, None)
+            else:
+                return (False, total_time, status, "Stream ended without message_stop", first_token_time, output_tokens, None)
 
     except Exception as e:
         total_time = time.time() - start_time
@@ -337,7 +397,10 @@ def test_concurrency(concurrency_level, tester=None):
         print(f"   输出Token: 总计 {sum_tokens} | 单次平均 {avg_tokens:.1f}")
         print(f"   输出速率(tokens/s): 平均 {avg_tps:.2f} | P50 {p50_tps:.2f} | P95 {p95_tps:.2f} | 最高 {max_tps:.2f}")
     else:
-        print("   ⚠️ 未获取到 usage.output_tokens；如需估算，请使用 --estimate-tokens 参数。")
+        if tester.use_chat_api:
+            print("   ⚠️ 未获取到 usage.completion_tokens；如需估算，请使用 --estimate-tokens 参数。")
+        else:
+            print("   ⚠️ 未获取到 usage.output_tokens；如需估算，请使用 --estimate-tokens 参数。")
 
     if result.errors:
         print_limit = tester.print_sample_errors
@@ -359,6 +422,7 @@ def parse_arguments():
   python api_performance_tester.py --key your_api_key_here --model glm-4-0528
   python api_performance_tester.py --key your_api_key_here --min 5 --max 50 --step 5
   python api_performance_tester.py --key your_api_key_here --rounds 3 --timeout 60
+  python api_performance_tester.py --key your_api_key_here --chat-api  # 使用 Chat API 接口
         """
     )
     
@@ -426,6 +490,11 @@ def parse_arguments():
         default=DEFAULT_CHARS_PER_TOKEN,
         help="每个 token 的字符数（默认：%(default).1f）"
     )
+    parser.add_argument(
+        "--chat-api",
+        action="store_true",
+        help="使用 Chat API 接口（默认：使用 Anthropic 接口）"
+    )
     
     return parser.parse_args()
 
@@ -447,7 +516,8 @@ def main():
         test_rounds=args.rounds,
         timeout=args.timeout,
         estimate_tokens_by_chars=args.estimate_tokens,
-        chars_per_token=args.chars_per_token
+        chars_per_token=args.chars_per_token,
+        use_chat_api=args.chat_api
     )
     
     # 运行测试
