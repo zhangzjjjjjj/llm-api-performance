@@ -1,4 +1,4 @@
-# API 性能测试工具
+# LLM API 性能测试工具
 
 一个用于测试 BigModel API 并发性能的 Python 工具，支持 SSE（Server-Sent Events）流式请求，可以统计 TTFT（首 token 时间）、完成时间、tokens/s 等关键性能指标。
 
@@ -15,6 +15,7 @@
 - 📈 详细的性能报告和错误分析
 - 🔧 灵活的配置选项
 - 🔄 支持多种 API 接口格式
+- ⏱️ 支持流式和非流式请求模式
 
 ## 安装要求
 
@@ -50,6 +51,9 @@ python api_performance_tester.py --key your_api_key_here --estimate-tokens
 # 使用 Chat API 接口
 python api_performance_tester.py --key your_api_key_here --chat-api
 
+# 禁用流式请求（使用非流式模式）
+python api_performance_tester.py --key your_api_key_here --no-stream
+
 # 自定义 Chat API URL
 python api_performance_tester.py --key your_api_key_here --url https://open.bigmodel.cn/api/paas/v4/chat/completions
 
@@ -79,9 +83,19 @@ chat_tester = APIPerformanceTester(
     use_chat_api=True  # 启用 Chat API 模式
 )
 
+# 使用非流式模式
+non_stream_tester = APIPerformanceTester(
+    api_url="https://open.bigmodel.cn/api/anthropic/v1/messages",
+    api_key="your_api_key",
+    model="glm-4.5",
+    test_message="测试消息内容",
+    use_stream=False  # 禁用流式请求
+)
+
 # 运行测试
 results = tester.run_test()
 chat_results = chat_tester.run_test()
+non_stream_results = non_stream_tester.run_test()
 ```
 
 ### 3. 高级配置
@@ -95,6 +109,7 @@ tester.step = 5                  # 并发步长
 tester.test_rounds = 3           # 每个并发级别测试轮数
 tester.timeout = 60              # 请求超时时间（秒）
 tester.estimate_tokens_by_chars = True  # 使用字符数估算 tokens
+tester.use_stream = False        # 禁用流式请求
 ```
 
 ## 配置参数
@@ -107,6 +122,7 @@ tester.estimate_tokens_by_chars = True  # 使用字符数估算 tokens
 - `MODEL`: 使用的模型（如 glm-4.5）
 - `TEST_MESSAGE`: 测试消息内容
 - `USE_CHAT_API`: 是否使用 Chat API 接口格式（默认：False）
+- `USE_STREAM`: 是否使用流式请求（默认：True）
 
 ### 测试参数
 - `MIN_CONCURRENCY`: 最小并发级别（默认：15）
@@ -122,10 +138,10 @@ tester.estimate_tokens_by_chars = True  # 使用字符数估算 tokens
 
 1. **成功率**: 成功请求占总请求的百分比
 2. **平均完成时间**: 从发送请求到收到完整响应的平均时间
-3. **TTFT（首字响应时间）**: 
-   - 平均值
-   - P50（中位数）
-   - P95（95分位数）
+3. **响应时间指标**:
+   - **流式模式**: TTFT（Time To First Token，首字响应时间）
+   - **非流式模式**: TTFB（Time To First Byte，首字节响应时间）
+   - 平均值、P50（中位数）、P95（95分位数）
 4. **输出速率（tokens/s）**:
    - 平均值
    - P50、P95
@@ -147,6 +163,7 @@ tester.estimate_tokens_by_chars = True  # 使用字符数估算 tokens
 | `--estimate-tokens` | 使用字符数估算 tokens | False |
 | `--chars-per-token` | 每个 token 的字符数 | 4.0 |
 | `--chat-api` | 使用 Chat API 接口格式 | False |
+| `--no-stream` | 禁用流式请求 | False |
 
 ## 使用示例
 
@@ -224,22 +241,59 @@ API 地址: https://open.bigmodel.cn/api/paas/v4/chat/completions
       15 |   99.0% |       3.21s |    0.567s |       138.92
 ```
 
-### 3. 接口对比测试
+### 3. 非流式请求测试
 
 ```bash
-# 分别测试两种接口性能
-# Anthropic 接口
-python api_performance_tester.py --key your_api_key_here --min 10 --max 30 --step 10 --rounds 2 > anthropic_results.txt
+# 使用非流式模式测试
+$ python api_performance_tester.py --key your_api_key_here --no-stream
 
-# Chat API 接口
-python api_performance_tester.py --key your_api_key_here --min 10 --max 30 --step 10 --rounds 2 --chat-api > chat_results.txt
+🚀 开始 API 并发性能测试（SSE + TTFT + tokens/s）
+⚠️  流式请求已禁用，使用非流式模式
+测试时间: 2025-01-01 10:00:00
+API 地址: https://open.bigmodel.cn/api/anthropic/v1/messages
+模型: glm-4.5
+测试范围: 5-100 并发 (步长: 5)
+每个并发级别测试轮数: 1
+单请求超时: 120秒
+
+🔄 测试并发级别: 5
+==================================================
+   第 1/1 轮测试...
+📊 测试结果:
+   总请求数: 5
+   成功: 5 | 失败: 0
+   成功率: 100.0%
+   平均完成时间: 1.85s  (最快 1.52s | 最慢 2.31s)
+   响应时间(TTFB): 平均 1.850s | P50 1.820s | P95 2.150s
+   输出Token: 总计 4850 | 单次平均 323.3
+   输出速率(tokens/s): 平均 174.76 | P50 178.45 | P95 192.34 | 最高 212.67
+
+============================================================
+📋 测试汇总报告 https://open.bigmodel.cn/api/anthropic/v1/messages
+============================================================
+
+并发级别 | 成功率 | 平均完成时间 | 平均响应时间 | 平均tokens/s
+----------------------------------------------------------------------
+       5 |  100.0% |       1.85s |      1.850s |       174.76
+      10 |  100.0% |       2.12s |      2.120s |       152.45
+      15 |   99.0% |       2.67s |      2.670s |       121.08
+```
+
+### 4. 流式 vs 非流式对比测试
+
+```bash
+# 流式模式测试
+python api_performance_tester.py --key your_api_key_here --min 10 --max 30 --step 10 --rounds 2 > streaming_results.txt
+
+# 非流式模式测试
+python api_performance_tester.py --key your_api_key_here --min 10 --max 30 --step 10 --rounds 2 --no-stream > non_streaming_results.txt
 
 # 对比结果
-echo "=== Anthropic 接口 ==="
-cat anthropic_results.txt | grep -A 10 "测试汇总报告"
+echo "=== 流式模式 ==="
+cat streaming_results.txt | grep -A 10 "测试汇总报告"
 
-echo -e "\n=== Chat API 接口 ==="
-cat chat_results.txt | grep -A 10 "测试汇总报告"
+echo -e "\n=== 非流式模式 ==="
+cat non_streaming_results.txt | grep -A 10 "测试汇总报告"
 ```
 
 ## 注意事项
@@ -264,6 +318,11 @@ cat chat_results.txt | grep -A 10 "测试汇总报告"
    - 两种接口的响应格式不同，工具会自动识别并解析
    - Chat API 的 token 统计字段为 `completion_tokens`，Anthropic 接口为 `output_tokens`
 
+7. **流式 vs 非流式模式**:
+   - **流式模式**（默认）：使用 SSE（Server-Sent Events），可以测量 TTFT（首 token 时间）
+   - **非流式模式**（`--no-stream`）：等待完整响应后一次性返回，响应时间以 TTFB 为准
+   - 非流式模式适用于不需要实时流式输出的场景，或对比两种模式的性能差异
+
 ## 许可证
 
 MIT License
@@ -273,6 +332,12 @@ MIT License
 欢迎提交 Issue 和 Pull Request！
 
 ## 更新日志
+
+### v1.2.0
+- 新增非流式请求支持
+- 添加 `--no-stream` 命令行参数
+- 在非流式模式下使用 TTFB 替代 TTFT 指标
+- 支持流式和非流式模式对比测试
 
 ### v1.1.0
 - 新增 Chat API 接口支持

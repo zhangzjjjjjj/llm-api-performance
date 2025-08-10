@@ -39,7 +39,7 @@ class APIPerformanceTester:
     def __init__(self, api_url=None, api_key=None, model=None, test_message=None, 
                  min_concurrency=None, max_concurrency=None, step=None, test_rounds=None,
                  timeout=None, print_sample_errors=None, estimate_tokens_by_chars=None,
-                 chars_per_token=None, use_chat_api=None):
+                 chars_per_token=None, use_chat_api=None, use_stream=None):
         """初始化测试配置
         
         Args:
@@ -56,6 +56,7 @@ class APIPerformanceTester:
             estimate_tokens_by_chars: 是否估算 tokens
             chars_per_token: 字符/token 比率
             use_chat_api: 是否使用 Chat API 接口
+            use_stream: 是否使用流式请求
         """
         # API 配置
         self.use_chat_api = use_chat_api or False
@@ -66,6 +67,7 @@ class APIPerformanceTester:
         self.api_key = api_key
         self.model = model or DEFAULT_MODEL
         self.test_message = test_message or DEFAULT_TEST_MESSAGE
+        self.use_stream = use_stream if use_stream is not None else True  # 默认启用流式
         
         # 测试参数
         self.min_concurrency = min_concurrency or DEFAULT_MIN_CONCURRENCY
@@ -86,6 +88,8 @@ class APIPerformanceTester:
             return None
             
         print("🚀 开始 API 并发性能测试（SSE + TTFT + tokens/s）")
+        if not self.use_stream:
+            print("⚠️  流式请求已禁用，使用非流式模式")
         print(f"测试时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"API 地址: {self.api_url}")
         print(f"模型: {self.model}")
@@ -117,7 +121,10 @@ class APIPerformanceTester:
         print("\n" + "=" * 60)
         print(f"📋 测试汇总报告 {self.api_url}")
         print("=" * 60)
-        print("\n并发级别 | 成功率 | 平均完成时间 | 平均TTFT | 平均tokens/s")
+        if self.use_stream:
+            print("\n并发级别 | 成功率 | 平均完成时间 | 平均TTFT | 平均tokens/s")
+        else:
+            print("\n并发级别 | 成功率 | 平均完成时间 | 平均响应时间 | 平均tokens/s")
         print("-" * 70)
 
         for concurrency, result in results.items():
@@ -180,11 +187,15 @@ def make_request(tester=None):
         }
         payload = {
             "model": model,
+            "max_tokens": 1024,
+            "temperature": 0.2,
             "messages": [
+                {"role": "system", "content": "你是一个严谨的助手，只返回最终答案。"},
                 {"role": "user", "content": test_message}
-            ],
-            "stream": True
+            ]
         }
+        if tester.use_stream:
+            payload["stream"] = True
     else:
         headers = {
             "x-api-key": api_key,
@@ -197,16 +208,17 @@ def make_request(tester=None):
             "temperature": 0.2,
             "messages": [
                 {"role": "user", "content": test_message}
-            ],
-            "stream": True
+            ]
         }
+        if tester.use_stream:
+            payload["stream"] = True
 
     try:
         with requests.post(
             api_url,
             headers=headers,
             data=json.dumps(payload),
-            stream=True,
+            stream=tester.use_stream,  # 根据 use_stream 决定是否使用流式
             timeout=timeout,
         ) as r:
             status = r.status_code
@@ -215,6 +227,43 @@ def make_request(tester=None):
                 text = r.text[:200] if r.text else ""
                 return (False, total_time, status, f"HTTP {status}: {text}", None, None, None)
 
+            # 处理非流式响应
+            if not tester.use_stream:
+                total_time = time.time() - start_time
+                response_data = r.json()
+                
+                # 根据接口类型解析不同的响应格式
+                if tester.use_chat_api:
+                    # Chat API 格式
+                    usage = response_data.get("usage", {})
+                    output_tokens = usage.get("completion_tokens")
+                    content = ""
+                    choices = response_data.get("choices", [])
+                    if choices:
+                        message = choices[0].get("message", {})
+                        content = message.get("content", "")
+                else:
+                    # Anthropic API 格式
+                    usage = response_data.get("usage", {})
+                    output_tokens = usage.get("output_tokens")
+                    content = ""
+                    content_blocks = response_data.get("content", [])
+                    for block in content_blocks:
+                        if block.get("type") == "text":
+                            content += block.get("text", "")
+                
+                # 如果没有获取到 token 数，按需估算
+                if output_tokens is None and estimate_tokens_by_chars:
+                    output_tokens = max(1, int(len(content) / chars_per_token))
+                
+                # 计算 tokens/s
+                tokens_per_sec = None
+                if output_tokens is not None and total_time > 0:
+                    tokens_per_sec = output_tokens / total_time
+                
+                return (True, total_time, status, None, total_time, output_tokens, tokens_per_sec)
+
+            # 处理流式响应
             for raw_line in r.iter_lines(decode_unicode=True):
                 if not raw_line or not raw_line.startswith("data:"):
                     continue
@@ -392,7 +441,11 @@ def test_concurrency(concurrency_level, tester=None):
     print(f"   成功: {result.success_count} | 失败: {result.failure_count}")
     print(f"   成功率: {success_rate:.1f}%")
     print(f"   平均完成时间: {avg_response_time:.2f}s  (最快 {min_response_time:.2f}s | 最慢 {max_response_time:.2f}s)")
-    print(f"   TTFT(首字响应): 平均 {avg_ttft:.3f}s | P50 {p50_ttft:.3f}s | P95 {p95_ttft:.3f}s")
+    if tester.use_stream:
+        print(f"   TTFT(首字响应): 平均 {avg_ttft:.3f}s | P50 {p50_ttft:.3f}s | P95 {p95_ttft:.3f}s")
+    else:
+        print(f"   响应时间(TTFB): 平均 {avg_ttft:.3f}s | P50 {p50_ttft:.3f}s | P95 {p95_ttft:.3f}s")
+    
     if result.tokens_per_sec:
         print(f"   输出Token: 总计 {sum_tokens} | 单次平均 {avg_tokens:.1f}")
         print(f"   输出速率(tokens/s): 平均 {avg_tps:.2f} | P50 {p50_tps:.2f} | P95 {p95_tps:.2f} | 最高 {max_tps:.2f}")
@@ -423,6 +476,7 @@ def parse_arguments():
   python api_performance_tester.py --key your_api_key_here --min 5 --max 50 --step 5
   python api_performance_tester.py --key your_api_key_here --rounds 3 --timeout 60
   python api_performance_tester.py --key your_api_key_here --chat-api  # 使用 Chat API 接口
+  python api_performance_tester.py --key your_api_key_here --no-stream  # 禁用流式请求
         """
     )
     
@@ -495,6 +549,11 @@ def parse_arguments():
         action="store_true",
         help="使用 Chat API 接口（默认：使用 Anthropic 接口）"
     )
+    parser.add_argument(
+        "--no-stream",
+        action="store_true",
+        help="禁用流式请求（默认：启用流式）"
+    )
     
     return parser.parse_args()
 
@@ -505,8 +564,13 @@ def main():
     args = parse_arguments()
     
     # 创建测试器实例
+    # 如果使用 Chat API 且未指定 URL，则使用默认的 Chat API URL
+    api_url = args.url
+    if args.chat_api and api_url == DEFAULT_API_URL:
+        api_url = DEFAULT_CHAT_API_URL
+    
     tester = APIPerformanceTester(
-        api_url=args.url,
+        api_url=api_url,
         api_key=args.key,
         model=args.model,
         test_message=args.message,
@@ -517,7 +581,8 @@ def main():
         timeout=args.timeout,
         estimate_tokens_by_chars=args.estimate_tokens,
         chars_per_token=args.chars_per_token,
-        use_chat_api=args.chat_api
+        use_chat_api=args.chat_api,
+        use_stream=not args.no_stream
     )
     
     # 运行测试
