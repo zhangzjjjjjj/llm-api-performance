@@ -52,3 +52,6 @@ logs/
 # OS generated files
 Thumbs.db
 Desktop.ini
+
+example.sh
+run_context.sh
